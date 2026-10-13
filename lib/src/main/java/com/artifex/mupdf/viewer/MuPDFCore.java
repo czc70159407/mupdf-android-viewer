@@ -74,6 +74,35 @@ public class MuPDFCore
 		return reflowable;
 	}
 
+	/**
+	 * M9: 页码 -> 跨重排稳定的 bookmark（fitz makeBookmark(locationFromPageNumber(page))）。
+	 * 供流式文档（epub）以 bookmark 十进制串作为进度锚点（docs/m9-plan.md L1）。
+	 * 返回 0 表示失败（调用方据此回落页码式兜底）。
+	 */
+	public synchronized long pageToBookmark(int pageNum) {
+		if (doc == null)
+			return 0L;
+		try {
+			return doc.makeBookmark(doc.locationFromPageNumber(pageNum));
+		} catch (Exception ex) {
+			return 0L;
+		}
+	}
+
+	/**
+	 * M9: bookmark -> 当前排版下的页码（fitz pageNumberFromLocation(findBookmark(mark))）。
+	 * mark 非法/越界时返回 -1（调用方据此钳制/回落）。
+	 */
+	public synchronized int bookmarkToPage(long mark) {
+		if (doc == null)
+			return -1;
+		try {
+			return doc.pageNumberFromLocation(doc.findBookmark(mark));
+		} catch (Exception ex) {
+			return -1;
+		}
+	}
+
 	public synchronized int layout(int oldPage, int w, int h, int em) {
 		if (w != layoutW || h != layoutH || em != layoutEM) {
 			System.out.println("LAYOUT: " + w + "," + h);
