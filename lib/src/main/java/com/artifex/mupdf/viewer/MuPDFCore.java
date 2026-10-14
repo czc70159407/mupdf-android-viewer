@@ -47,9 +47,22 @@ public class MuPDFCore
 
 	private MuPDFCore(Document doc) {
 		this.doc = doc;
-		doc.layout(layoutW, layoutH, layoutEM);
-		pageCount = doc.countPages();
-		reflowable = doc.isReflowable();
+		// 加密文档（如加密 epub）认证前 layout/countPages 可能失败：延迟到认证后，
+		// 失败仅记 pageCount=0（引擎据此走 needsPassword 路径，而非误判损坏）
+		try {
+			doc.layout(layoutW, layoutH, layoutEM);
+			pageCount = doc.countPages();
+		} catch (Exception ex) {
+			pageCount = 0;
+			// 标记未排版，强制下次 layout() 执行重排（加密文档认证后补排路径）
+			layoutW = -1;
+			layoutH = -1;
+		}
+		try {
+			reflowable = doc.isReflowable();
+		} catch (Exception ex) {
+			reflowable = false;
+		}
 		resolution = 160;
 		currentPage = -1;
 	}
@@ -79,13 +92,18 @@ public class MuPDFCore
 	 * 供流式文档（epub）以 bookmark 十进制串作为进度锚点（docs/m9-plan.md L1）。
 	 * 返回 0 表示失败（调用方据此回落页码式兜底）。
 	 */
+	/**
+	 * M9: 页码 -> 跨重排稳定的 bookmark（fitz makeBookmark(locationFromPageNumber(page))）。
+	 * 供流式文档（epub）以 bookmark 十进制串作为进度锚点。失败返回 Long.MIN_VALUE（与合法
+	 * bookmark 0 区分，避免首章首页被误判失败）。
+	 */
 	public synchronized long pageToBookmark(int pageNum) {
 		if (doc == null)
-			return 0L;
+			return Long.MIN_VALUE;
 		try {
 			return doc.makeBookmark(doc.locationFromPageNumber(pageNum));
 		} catch (Exception ex) {
-			return 0L;
+			return Long.MIN_VALUE;
 		}
 	}
 
@@ -93,33 +111,47 @@ public class MuPDFCore
 	 * M9: bookmark -> 当前排版下的页码（fitz pageNumberFromLocation(findBookmark(mark))）。
 	 * mark 非法/越界时返回 -1（调用方据此钳制/回落）。
 	 */
+	/**
+	 * M9: bookmark -> 当前排版下的页码。失败（非法/失效 anchor，或 doc==null）返回 -2。
+	 * 通过「bookmark→page→bookmark」往返一致性校验区分「真实第 0 页」与「失效锚点」，
+	 * 失效锚点返回 -2 让调用方回落到 payload 内 page，避免静默跳回首页。
+	 */
 	public synchronized int bookmarkToPage(long mark) {
 		if (doc == null)
-			return -1;
+			return -2;
 		try {
-			return doc.pageNumberFromLocation(doc.findBookmark(mark));
+			int page = doc.pageNumberFromLocation(doc.findBookmark(mark));
+			long back = doc.makeBookmark(doc.locationFromPageNumber(page));
+			if (back != mark)
+				return -2;
+			return page;
 		} catch (Exception ex) {
-			return -1;
+			return -2;
 		}
 	}
 
 	public synchronized int layout(int oldPage, int w, int h, int em) {
+		if (doc == null)
+			return oldPage;
 		if (w != layoutW || h != layoutH || em != layoutEM) {
-			System.out.println("LAYOUT: " + w + "," + h);
 			layoutW = w;
 			layoutH = h;
 			layoutEM = em;
-			long mark = doc.makeBookmark(doc.locationFromPageNumber(oldPage));
-			doc.layout(layoutW, layoutH, layoutEM);
-			currentPage = -1;
-			pageCount = doc.countPages();
-			outline = null;
 			try {
-				outline = doc.loadOutline();
+				long mark = (oldPage >= 0) ? doc.makeBookmark(doc.locationFromPageNumber(oldPage)) : -1L;
+				doc.layout(layoutW, layoutH, layoutEM);
+				currentPage = -1;
+				pageCount = doc.countPages();
+				outline = null;
+				try {
+					outline = doc.loadOutline();
+				} catch (Exception ex) {
+					/* ignore error */
+				}
+				return (oldPage >= 0) ? doc.pageNumberFromLocation(doc.findBookmark(mark)) : 0;
 			} catch (Exception ex) {
-				/* ignore error */
+				return (oldPage >= 0) ? oldPage : 0;
 			}
-			return doc.pageNumberFromLocation(doc.findBookmark(mark));
 		}
 		return oldPage;
 	}
