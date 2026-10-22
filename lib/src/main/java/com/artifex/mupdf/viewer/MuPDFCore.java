@@ -89,11 +89,6 @@ public class MuPDFCore
 
 	/**
 	 * M9: 页码 -> 跨重排稳定的 bookmark（fitz makeBookmark(locationFromPageNumber(page))）。
-	 * 供流式文档（epub）以 bookmark 十进制串作为进度锚点（docs/m9-plan.md L1）。
-	 * 返回 0 表示失败（调用方据此回落页码式兜底）。
-	 */
-	/**
-	 * M9: 页码 -> 跨重排稳定的 bookmark（fitz makeBookmark(locationFromPageNumber(page))）。
 	 * 供流式文档（epub）以 bookmark 十进制串作为进度锚点。失败返回 Long.MIN_VALUE（与合法
 	 * bookmark 0 区分，避免首章首页被误判失败）。
 	 */
@@ -107,10 +102,6 @@ public class MuPDFCore
 		}
 	}
 
-	/**
-	 * M9: bookmark -> 当前排版下的页码（fitz pageNumberFromLocation(findBookmark(mark))）。
-	 * mark 非法/越界时返回 -1（调用方据此钳制/回落）。
-	 */
 	/**
 	 * M9: bookmark -> 当前排版下的页码。失败（非法/失效 anchor，或 doc==null）返回 -2。
 	 * 通过「bookmark→page→bookmark」往返一致性校验区分「真实第 0 页」与「失效锚点」，
