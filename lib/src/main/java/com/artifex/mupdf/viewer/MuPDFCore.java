@@ -4,6 +4,7 @@ import com.artifex.mupdf.fitz.Cookie;
 import com.artifex.mupdf.fitz.DisplayList;
 import com.artifex.mupdf.fitz.Document;
 import com.artifex.mupdf.fitz.Link;
+import com.artifex.mupdf.fitz.Location;
 import com.artifex.mupdf.fitz.Matrix;
 import com.artifex.mupdf.fitz.Outline;
 import com.artifex.mupdf.fitz.Page;
@@ -44,6 +45,10 @@ public class MuPDFCore
 	private int layoutEM = 10;
 
 	private boolean outlineTruncated;
+
+	/* M11：页 → 章 映射缓存（chapterOfPageCount 为生成时的页数，用于失效判定） */
+	private int[] chapterOfPage;
+	private int chapterOfPageCount = -1;
 
 	private MuPDFCore(Document doc) {
 		this.doc = doc;
@@ -121,6 +126,86 @@ public class MuPDFCore
 		}
 	}
 
+	/**
+	 * M11: 页码 -> 当前排版下的 Location 分量 {chapter, pageInChapter}。
+	 * 真机 S0-2 实测：Location 分量**跨 doc 会话可精确还原**（bookmark long 不行），
+	 * 故进度/书签锚点以此为准。失败返回 null。
+	 */
+	public synchronized int[] pageToLocation(int pageNum) {
+		if (doc == null)
+			return null;
+		try {
+			Location loc = doc.locationFromPageNumber(pageNum);
+			return new int[] { loc.chapter, loc.page };
+		} catch (Exception ex) {
+			return null;
+		}
+	}
+
+	/**
+	 * M11: Location 分量 -> 当前排版页码；doc 为空/越界/异常返回 -2。
+	 * 注意：章内页码超出该章页数时 MuPDF 会**静默落到相邻章**（S0-2 C 组实测），
+	 * 调用方须用 {@link #pageToLocation(int)} 回读校验结果是否仍为同一 Location。
+	 */
+	public synchronized int pageFromLocation(int chapter, int pageInChapter) {
+		if (doc == null)
+			return -2;
+		try {
+			int page = doc.pageNumberFromLocation(new Location(chapter, pageInChapter));
+			if (page < 0 || page >= doc.countPages())
+				return -2;
+			return page;
+		} catch (Exception ex) {
+			return -2;
+		}
+	}
+
+	/**
+	 * M11: 指定章在当前排版下的 {起始页, 页数}；章不存在或异常返回 null。
+	 * 整册扫描（页数量级 10^2~10^3），仅在抓取/还原锚点时调用（S0-2：Location 无章页数 API）。
+	 */
+	public synchronized int[] chapterRange(int chapter) {
+		if (chapter < 0)
+			return null;
+		int[] map = chapterOfPageMap();
+		if (map == null)
+			return null;
+		int first = -1;
+		int last = -1;
+		for (int p = 0; p < map.length; p++) {
+			if (map[p] != chapter)
+				continue;
+			if (first < 0)
+				first = p;
+			last = p;
+		}
+		return first < 0 ? null : new int[] { first, last - first + 1 };
+	}
+
+	/**
+	 * M11：页 → 章 映射缓存（一次整册扫描，供 {@link #chapterRange(int)} 复用）。
+	 * 键为页数：layout() 主动置空，页数变化（认证后补排等）亦自动重扫。
+	 */
+	private int[] chapterOfPageMap() {
+		if (doc == null)
+			return null;
+		try {
+			int total = doc.countPages();
+			if (chapterOfPage != null && chapterOfPageCount == total)
+				return chapterOfPage;
+			int[] map = new int[total];
+			for (int p = 0; p < total; p++)
+				map[p] = doc.locationFromPageNumber(p).chapter;
+			chapterOfPage = map;
+			chapterOfPageCount = total;
+			return map;
+		} catch (Exception ex) {
+			chapterOfPage = null;
+			chapterOfPageCount = -1;
+			return null;
+		}
+	}
+
 	public synchronized int layout(int oldPage, int w, int h, int em) {
 		if (doc == null)
 			return oldPage;
@@ -129,19 +214,29 @@ public class MuPDFCore
 			layoutH = h;
 			layoutEM = em;
 			try {
-				long mark = (oldPage >= 0) ? doc.makeBookmark(doc.locationFromPageNumber(oldPage)) : -1L;
+				// M11：旧页 remap 改走 Location 分量（bookmark long 跨会话失效，S0-2 B 组实测），
+				// 同章内精确还原；章页数变化导致越界时按该章起始页兜底，避免返回越界旧页。
+				int[] loc = (oldPage >= 0) ? pageToLocation(oldPage) : null;
 				doc.layout(layoutW, layoutH, layoutEM);
 				currentPage = -1;
 				pageCount = doc.countPages();
+				chapterOfPage = null;
+				chapterOfPageCount = -1;
 				outline = null;
 				try {
 					outline = doc.loadOutline();
 				} catch (Exception ex) {
 					/* ignore error */
 				}
-				return (oldPage >= 0) ? doc.pageNumberFromLocation(doc.findBookmark(mark)) : 0;
+				if (loc == null)
+					return 0;
+				int page = pageFromLocation(loc[0], loc[1]);
+				if (page >= 0)
+					return page;
+				int[] range = chapterRange(loc[0]);
+				return range != null ? range[0] : 0;
 			} catch (Exception ex) {
-				return (oldPage >= 0) ? oldPage : 0;
+				return (oldPage >= 0) ? Math.min(oldPage, Math.max(pageCount - 1, 0)) : 0;
 			}
 		}
 		return oldPage;
