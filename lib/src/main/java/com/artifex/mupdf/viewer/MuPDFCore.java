@@ -217,6 +217,11 @@ public class MuPDFCore
 				// M11：旧页 remap 改走 Location 分量（bookmark long 跨会话失效，S0-2 B 组实测），
 				// 同章内精确还原；章页数变化导致越界时按该章起始页兜底，避免返回越界旧页。
 				int[] loc = (oldPage >= 0) ? pageToLocation(oldPage) : null;
+				int oldChapterPages = -1;
+				if (loc != null) {
+					int[] before = chapterRange(loc[0]);
+					oldChapterPages = (before != null) ? before[1] : -1;
+				}
 				doc.layout(layoutW, layoutH, layoutEM);
 				currentPage = -1;
 				pageCount = doc.countPages();
@@ -228,18 +233,41 @@ public class MuPDFCore
 				} catch (Exception ex) {
 					/* ignore error */
 				}
+				// 定位信息不可得时**停在钳制后的旧页**，不要跳回首页（重排失败不等于用户回到开头）
 				if (loc == null)
-					return 0;
-				int page = pageFromLocation(loc[0], loc[1]);
-				if (page >= 0)
-					return page;
+					return clampPage(oldPage);
 				int[] range = chapterRange(loc[0]);
-				return range != null ? range[0] : 0;
+				if (range == null)
+					return clampPage(oldPage);
+				int page = pageFromLocation(loc[0], loc[1]);
+				int[] back = (page >= 0) ? pageToLocation(page) : null;
+				boolean samePagination = back != null && back[0] == loc[0] && back[1] == loc[1]
+						&& range[1] == oldChapterPages;
+				if (samePagination)
+					return page;
+				// 章页数已变（重排）：pageInChapter 是相对值，直接还原会落在不同内容上，
+				// 必须按章内比例折算（真机：横屏 21 页/章 ↔ 竖屏 10 页/章）
+				if (oldChapterPages <= 0)
+					return range[0];
+				double ratio = (loc[1] + 0.5) / oldChapterPages;
+				int offset = (int) (ratio * range[1]);
+				if (offset < 0)
+					offset = 0;
+				if (offset > range[1] - 1)
+					offset = range[1] - 1;
+				return range[0] + offset;
 			} catch (Exception ex) {
-				return (oldPage >= 0) ? Math.min(oldPage, Math.max(pageCount - 1, 0)) : 0;
+				return clampPage(oldPage);
 			}
 		}
 		return oldPage;
+	}
+
+	/** 页码钳到当前排版范围（负值归 0；pageCount 未就绪时返回 0）。 */
+	private int clampPage(int page) {
+		if (page <= 0 || pageCount <= 0)
+			return 0;
+		return Math.min(page, pageCount - 1);
 	}
 
 	private synchronized void gotoPage(int pageNum) {
