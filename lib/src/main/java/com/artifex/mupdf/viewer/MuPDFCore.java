@@ -423,6 +423,33 @@ public class MuPDFCore
 	}
 
 	/**
+	 * M12：清空某页所有高亮 annotation（删除后重建用）。返回是否有变更。
+	 */
+	public synchronized boolean clearHighlights(int pageNum) {
+		gotoPage(pageNum);
+		if (!(page instanceof PDFPage))
+			return false;
+		try {
+			PDFPage pdfPage = (PDFPage) page;
+			PDFAnnotation[] anns = pdfPage.getAnnotations();
+			boolean changed = false;
+			for (PDFAnnotation ann : anns) {
+				if (ann.getType() == PDFAnnotation.TYPE_HIGHLIGHT) {
+					pdfPage.deleteAnnotation(ann);
+					changed = true;
+				}
+			}
+			if (changed && displayList != null) {
+				displayList.destroy();
+				displayList = null;
+			}
+			return changed;
+		} catch (Exception ex) {
+			return false;
+		}
+	}
+
+	/**
 	 * M12：创建原生高亮 annotation（仅 PDF）。成功返回 true，并销毁当前页 displayList
 	 * 使下次 drawPage 重建（含新 annotation）。
 	 */
