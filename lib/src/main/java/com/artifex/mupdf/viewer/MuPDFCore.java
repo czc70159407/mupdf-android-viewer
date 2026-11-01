@@ -7,11 +7,15 @@ import com.artifex.mupdf.fitz.Link;
 import com.artifex.mupdf.fitz.Location;
 import com.artifex.mupdf.fitz.Matrix;
 import com.artifex.mupdf.fitz.Outline;
+import com.artifex.mupdf.fitz.PDFAnnotation;
+import com.artifex.mupdf.fitz.PDFPage;
 import com.artifex.mupdf.fitz.Page;
+import com.artifex.mupdf.fitz.Point;
 import com.artifex.mupdf.fitz.Quad;
 import com.artifex.mupdf.fitz.Rect;
 import com.artifex.mupdf.fitz.RectI;
 import com.artifex.mupdf.fitz.SeekableInputStream;
+import com.artifex.mupdf.fitz.StructuredText;
 import com.artifex.mupdf.fitz.android.AndroidDrawDevice;
 
 import android.content.Context;
@@ -369,6 +373,81 @@ public class MuPDFCore
 	public synchronized Quad[][] searchPage(int pageNum, String text) {
 		gotoPage(pageNum);
 		return page.search(text);
+	}
+
+	/** M12：文本选择结果（页面坐标 pt 的 quads + 选中文本）。 */
+	public static class TextSelection {
+		public final Quad[] quads;
+		public final String text;
+
+		TextSelection(Quad[] quads, String text) {
+			this.quads = quads;
+			this.text = text;
+		}
+	}
+
+	/**
+	 * M12：两点选择文本（页面坐标 pt，吸附到词边界）。
+	 *
+	 * 注意：fitz 1.28.2 的 `StructuredText.search(String)` 真机 JNI 崩溃
+	 * （`jobject invalid local reference`，M12 S0 探针已验证），故只用
+	 * `snapSelection`/`copy` 两点选择，不用 search。无文本或异常返回 null。
+	 */
+	public synchronized TextSelection selectText(int pageNum, float x0, float y0, float x1, float y1) {
+		gotoPage(pageNum);
+		if (page == null)
+			return null;
+		StructuredText st = null;
+		try {
+			st = page.toStructuredText("preserve-whitespace");
+			if (st == null)
+				return null;
+			Quad[] quads = st.highlight(new Point(x0, y0), new Point(x1, y1));
+			if (quads == null || quads.length == 0) {
+				// 单点长按（起止点相同）：highlight 为空，回退吸附到词边界取单个 quad
+				Quad q = st.snapSelection(new Point(x0, y0), new Point(x1, y1),
+						StructuredText.SELECT_WORDS);
+				if (q != null)
+					quads = new Quad[] { q };
+			}
+			if (quads == null || quads.length == 0)
+				return null;
+			String text = st.copy(new Point(x0, y0), new Point(x1, y1));
+			return new TextSelection(quads, text);
+		} catch (Exception ex) {
+			return null;
+		} finally {
+			if (st != null)
+				st.destroy();
+		}
+	}
+
+	/**
+	 * M12：创建原生高亮 annotation（仅 PDF）。成功返回 true，并销毁当前页 displayList
+	 * 使下次 drawPage 重建（含新 annotation）。
+	 */
+	public synchronized boolean addHighlight(int pageNum, Quad[] quads, float[] color) {
+		gotoPage(pageNum);
+		if (!(page instanceof PDFPage) || quads == null || quads.length == 0)
+			return false;
+		try {
+			PDFPage pdfPage = (PDFPage) page;
+			PDFAnnotation ann = pdfPage.createAnnotation(PDFAnnotation.TYPE_HIGHLIGHT);
+			if (ann == null)
+				return false;
+			ann.setQuadPoints(quads);
+			ann.setColor(color);
+			boolean ok = ann.update();
+			if (ok) {
+				if (displayList != null) {
+					displayList.destroy();
+					displayList = null;
+				}
+			}
+			return ok;
+		} catch (Exception ex) {
+			return false;
+		}
 	}
 
 	public synchronized boolean hasOutline() {
