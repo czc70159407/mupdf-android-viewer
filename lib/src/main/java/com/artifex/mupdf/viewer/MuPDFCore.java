@@ -3,6 +3,8 @@ package com.artifex.mupdf.viewer;
 import com.artifex.mupdf.fitz.Cookie;
 import com.artifex.mupdf.fitz.DisplayList;
 import com.artifex.mupdf.fitz.Document;
+import com.artifex.mupdf.fitz.Font;
+import com.artifex.mupdf.fitz.Image;
 import com.artifex.mupdf.fitz.Link;
 import com.artifex.mupdf.fitz.Location;
 import com.artifex.mupdf.fitz.Matrix;
@@ -16,6 +18,7 @@ import com.artifex.mupdf.fitz.Rect;
 import com.artifex.mupdf.fitz.RectI;
 import com.artifex.mupdf.fitz.SeekableInputStream;
 import com.artifex.mupdf.fitz.StructuredText;
+import com.artifex.mupdf.fitz.StructuredTextWalker;
 import com.artifex.mupdf.fitz.android.AndroidDrawDevice;
 
 import android.content.Context;
@@ -24,6 +27,7 @@ import android.graphics.PointF;
 import android.util.Log;
 
 import java.util.ArrayList;
+import java.util.List;
 
 public class MuPDFCore
 {
@@ -420,6 +424,129 @@ public class MuPDFCore
 			if (st != null)
 				st.destroy();
 		}
+	}
+
+	/** 页文本结构缓存：字符 Quad + unicode（拖柄高频重算复用，避免每次 MOVE 全页 walk） */
+	private TextStructure textStructure;
+	private int textStructurePage = -1;
+
+	/** 页文本结构：walk 一次结果（字符按阅读顺序） */
+	private static final class TextStructure {
+		final ArrayList<Quad> quads = new ArrayList<>();
+		final ArrayList<Integer> codes = new ArrayList<>();
+	}
+
+	/**
+	 * M14 方案 B：字符级精确选择——复用缓存文本结构，按点匹配起止字符，取连续区间。
+	 *
+	 * 相比 {@link #selectText}（矩形 highlight，会因手指微抖跨行选中相邻行行末），
+	 * 本方法按字符阅读顺序精确截取，天然平滑跨行、不跳行。
+	 *
+	 * 注：fitz 1.28.2 无 highlightSelection，故用 walk(StructuredTextWalker) 的 onChar 逐字构建；
+	 * 结构按页缓存（[getTextStructure]），拖柄高频 MOVE 只做内存索引查找，不再重复 walk。
+	 */
+	public synchronized TextSelection selectTextByChars(int pageNum, float x0, float y0, float x1, float y1) {
+		gotoPage(pageNum);
+		if (page == null)
+			return null;
+		TextStructure ts = getTextStructure(pageNum);
+		if (ts == null || ts.quads.isEmpty())
+			return null;
+		int i0 = indexOfPoint(ts.quads, x0, y0);
+		int i1 = indexOfPoint(ts.quads, x1, y1);
+		int lo = Math.min(i0, i1);
+		int hi = Math.max(i0, i1);
+		Quad[] sel = new Quad[hi - lo + 1];
+		StringBuilder sb = new StringBuilder();
+		for (int i = lo; i <= hi; i++) {
+			sel[i - lo] = ts.quads.get(i);
+			sb.appendCodePoint(ts.codes.get(i));
+		}
+		return new TextSelection(sel, sb.toString());
+	}
+
+	/** 获取页文本结构（按页缓存：同页直接返回，翻页重建） */
+	private synchronized TextStructure getTextStructure(int pageNum) {
+		if (textStructure != null && textStructurePage == pageNum && !textStructure.quads.isEmpty())
+			return textStructure;
+		StructuredText st = null;
+		try {
+			st = page.toStructuredText("preserve-whitespace");
+			if (st == null)
+				return null;
+			final TextStructure ts = new TextStructure();
+			st.walk(new StructuredTextWalker() {
+				@Override
+				public void onImageBlock(Rect bbox, Matrix transform, Image image) {
+				}
+
+				@Override
+				public void beginTextBlock(Rect bbox, int index) {
+				}
+
+				@Override
+				public void endTextBlock() {
+				}
+
+				@Override
+				public void beginLine(Rect bbox, int wmode, Point dir) {
+				}
+
+				@Override
+				public void endLine() {
+				}
+
+				@Override
+				public void onChar(int c, Point origin, Font font, float size, Quad quad,
+						int flags, int argb, int alpha) {
+					ts.quads.add(quad);
+					ts.codes.add(c);
+				}
+
+				@Override
+				public void beginStruct(String standard, String raw, int index) {
+				}
+
+				@Override
+				public void endStruct() {
+				}
+
+				@Override
+				public void onVector(Rect bbox, StructuredTextWalker.VectorInfo info, int argb) {
+				}
+			});
+			textStructure = ts;
+			textStructurePage = pageNum;
+			return ts;
+		} catch (Exception ex) {
+			textStructure = null;
+			textStructurePage = -1;
+			return null;
+		} finally {
+			if (st != null)
+				st.destroy();
+		}
+	}
+
+	/** 点 → 字符索引：优先命中的字符 quad，否则距字符中心最近 */
+	private static int indexOfPoint(List<Quad> quads, float x, float y) {
+		for (int i = 0; i < quads.size(); i++) {
+			if (quads.get(i).contains(x, y))
+				return i;
+		}
+		int best = 0;
+		float bestD = Float.MAX_VALUE;
+		for (int i = 0; i < quads.size(); i++) {
+			Quad q = quads.get(i);
+			float cx = (q.ul_x + q.lr_x) / 2f;
+			float cy = (q.ul_y + q.lr_y) / 2f;
+			float d = (cx - x) * (cx - x) + (cy - y) * (cy - y);
+			if (d < bestD) {
+				bestD = d;
+				best = i;
+			}
+		}
+		return best;
 	}
 
 	/**
