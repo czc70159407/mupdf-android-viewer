@@ -481,13 +481,65 @@ public class MuPDFCore
 			return null;
 		int i0 = indexOfPoint(ts.quads, x0, y0);
 		int i1 = indexOfPoint(ts.quads, x1, y1);
-		int lo = Math.min(i0, i1);
-		int hi = Math.max(i0, i1);
+		return slice(ts, Math.min(i0, i1), Math.max(i0, i1));
+	}
+
+	/**
+	 * M14：零位移长按取词——按页字符表做词边界扩展：英文/数字按连续词字符扩展，
+	 * 中文等非 ASCII 取单字。
+	 *
+	 * 不用 `StructuredText.snapSelection(SELECT_WORDS)`：其对无空格的 CJK 会把整行
+	 * 判定为一个词，中英混排行长按即选中整行、朗读整行。
+	 */
+	public synchronized TextSelection selectWordAt(int pageNum, float x, float y) {
+		gotoPage(pageNum);
+		if (page == null)
+			return null;
+		TextStructure ts = getTextStructure(pageNum);
+		if (ts == null || ts.quads.isEmpty())
+			return null;
+		int i = nearestNonSpace(ts.codes, indexOfPoint(ts.quads, x, y));
+		int lo = i;
+		int hi = i;
+		if (isWordCode(ts.codes.get(i))) {
+			while (lo > 0 && isWordCode(ts.codes.get(lo - 1)))
+				lo--;
+			while (hi < ts.codes.size() - 1 && isWordCode(ts.codes.get(hi + 1)))
+				hi++;
+		}
+		return slice(ts, lo, hi);
+	}
+
+	/** 词字符判定：ASCII 字母/数字与 _ ' @ -（CJK、空白、标点不扩展 → 中文按单字） */
+	private static boolean isWordCode(int c) {
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+				|| c == '_' || c == '\'' || c == '@' || c == '-';
+	}
+
+	/** 从 index 起向两侧找最近的非空白字符（长按落在空白时不至于选中单个空格）；无则原样返回 */
+	private static int nearestNonSpace(List<Integer> codes, int index) {
+		if (index < 0 || index >= codes.size())
+			return index;
+		int left = index;
+		int right = index;
+		while (left >= 0 || right < codes.size()) {
+			if (left >= 0 && !Character.isWhitespace(codes.get(left).intValue()))
+				return left;
+			if (right < codes.size() && !Character.isWhitespace(codes.get(right).intValue()))
+				return right;
+			left--;
+			right++;
+		}
+		return index;
+	}
+
+	/** 字符区间 → TextSelection（quads + 文本） */
+	private static TextSelection slice(TextStructure ts, int lo, int hi) {
 		Quad[] sel = new Quad[hi - lo + 1];
 		StringBuilder sb = new StringBuilder();
 		for (int i = lo; i <= hi; i++) {
 			sel[i - lo] = ts.quads.get(i);
-			sb.appendCodePoint(ts.codes.get(i));
+			sb.appendCodePoint(ts.codes.get(i).intValue());
 		}
 		return new TextSelection(sel, sb.toString());
 	}
