@@ -417,6 +417,11 @@ public class MuPDFCore
 			if (quads == null || quads.length == 0)
 				return null;
 			String text = st.copy(new Point(x0, y0), new Point(x1, y1));
+			if (text == null || text.trim().isEmpty()) {
+				// 零位移长按：highlight 为空时 quads 来自 snapSelection，而 copy 的零长度区间为空，
+				// 改用词 quad 端点重取文本（否则 draft.text 为空：朗读误报「未找到语音包」、复制空串）
+				text = copyByQuads(st, quads);
+			}
 			return new TextSelection(quads, text);
 		} catch (Exception ex) {
 			return null;
@@ -424,6 +429,28 @@ public class MuPDFCore
 			if (st != null)
 				st.destroy();
 		}
+	}
+
+	/**
+	 * 零长度选区回退取文本：按 quad 端点取阅读顺序区间（水平文字即首字符左上 → 末字符右下）；
+	 * 端点吸附不到字符时退化为 quad 中心 → 右下角。
+	 */
+	private static String copyByQuads(StructuredText st, Quad[] quads) {
+		StringBuilder sb = new StringBuilder();
+		for (Quad q : quads) {
+			float left = Math.min(Math.min(q.ul_x, q.ur_x), Math.min(q.ll_x, q.lr_x));
+			float top = Math.min(Math.min(q.ul_y, q.ur_y), Math.min(q.ll_y, q.lr_y));
+			float right = Math.max(Math.max(q.ul_x, q.ur_x), Math.max(q.ll_x, q.lr_x));
+			float bottom = Math.max(Math.max(q.ul_y, q.ur_y), Math.max(q.ll_y, q.lr_y));
+			String piece = st.copy(new Point(left, top), new Point(right, bottom));
+			if (piece == null || piece.isEmpty()) {
+				piece = st.copy(new Point((left + right) / 2f, (top + bottom) / 2f),
+						new Point(right, bottom));
+			}
+			if (piece != null)
+				sb.append(piece);
+		}
+		return sb.toString();
 	}
 
 	/** 页文本结构缓存：字符 Quad + unicode（拖柄高频重算复用，避免每次 MOVE 全页 walk） */
